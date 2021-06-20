@@ -98,6 +98,8 @@ public:
     int send_command(const uint8_t *tx, int tx_len, const uint8_t **rx2 = NULL, const char *cmd_name = "Rx", bool verbose = true, bool dump_rx_ex = false) {
         static uint8_t rx[512];
         int res;
+        printf("Tx: ");
+        print_hex(tx, tx_len);
         // TEMP:
         memset(rx, 0, sizeof(rx));
         if ((res = pn53x_transceive(m_pnd, tx, tx_len, rx, sizeof(rx), 0)) < 0) {
@@ -313,12 +315,14 @@ int typepreb_disconnect(PN53x *reader) {
     return reader->send_command(tx, 3, nullptr, "Disconnect");
 }
 
-int typepreb_command(PN53x *reader, const uint8_t *tx, size_t tx_len, const uint8_t **rx2, const char *cmd_name = "Command", uint8_t unk = 0x0E, bool dump_rx_ex = false) {
+int typepreb_command(PN53x *reader, const uint8_t *tx, size_t tx_len, const uint8_t **rx2, const char *cmd_name = "Command", bool dump_rx_ex = false) {
     // type B': command
     // 42 01 unk (len+2) 00 ... +[len bytes]
     // unk can be 0x02, 0x04, 0x06, 0x08, 0x0A, 0x0C, 0x0E
     // then that nibble is returned back
+    static uint8_t unk = 2;
     uint8_t tx2[5 + tx_len];
+    unk += 2; if (unk == 0) unk = 2; // TODO: understand what this is
     tx2[0] = InCommunicateThru; tx2[1] = 0x01; tx2[2] = unk & 0x0F; tx2[3] = tx_len + 2; tx2[4] = 0x00;
     memcpy(tx2 + 5, tx, tx_len);
     return reader->send_command(tx2, 5 + tx_len, rx2, cmd_name, true, dump_rx_ex);
@@ -344,7 +348,7 @@ int calypso_select_file(PN53x *reader, uint8_t id0, uint8_t id1, uint8_t id2, ui
         id0, id1, id2, id3
     };
     const uint8_t *rx2 = nullptr;
-    int res = typepreb_command(reader, tx, tx[3] + 4, &rx2, "SELECT_FILE", 0x0A);
+    int res = typepreb_command(reader, tx, tx[3] + 4, &rx2, "SELECT_FILE");
     if (res < 0)
         return -1;
     // 00  01  (40 | cnt)  (len data + 1) [data]
@@ -356,7 +360,7 @@ int calypso_select_file(PN53x *reader, uint8_t id0, uint8_t id1, uint8_t id2, ui
     return 0;
 }
 
-int calypso_read_records(PN53x *reader, uint8_t record_id = 0x01) {
+int calypso_read_records(PN53x *reader, uint8_t record_id = 0x01, bool read_all = true) {
     // https://cardwerk.com/smart-card-standard-iso7816-4-section-6-basic-interindustry-commands
     // section 6.5
 
@@ -368,11 +372,11 @@ int calypso_read_records(PN53x *reader, uint8_t record_id = 0x01) {
     const uint8_t tx[] = {
         READ_RECORDS,
         record_id, // NOTE: 0x00 indicates current record
-        0x05, // 0x04 = read record P1, 0x05 = read records from P1 to last, 0x06 = read records from last to P1
+        read_all ? (uint8_t) 0x05 : (uint8_t) 0x04, // 0x04 = read record P1, 0x05 = read records from P1 to last, 0x06 = read records from last to P1
         0x00 // length
     };
     const uint8_t *rx2 = nullptr;
-    int res = typepreb_command(reader, tx, tx[3] + 4, &rx2, "READ_RECORDS", 0x0C, true);
+    int res = typepreb_command(reader, tx, tx[3] + 4, &rx2, "READ_RECORDS", true);
     if (res < 0)
         return -1;
     // 00  01  (40 | cnt)  (len data + 1) [data]
@@ -396,14 +400,49 @@ int calypso_select_and_read_file(PN53x *reader, uint8_t id0, uint8_t id1, uint8_
 
 size_t read_hex_bytes(std::istream &is, uint8_t *buff, size_t max_len) {
     std::string tok;
+    uint32_t temp = 0;
     size_t cur = 0;
     while (std::getline(is, tok, ' ')) {
         if (!tok.size())
             continue;
-        if (sscanf(tok.c_str(), "%2x", &buff[cur]))
+        /*if (sscanf(tok.c_str(), "%2x", &temp)) {
+            buff[cur] = temp & 0xFF;
             ++cur;
+        }*/
+        char *endptr = nullptr;
+        errno = 0;
+        uint32_t temp = strtoul(tok.c_str(), &endptr, 16);
+        if (errno == 0 && endptr != nullptr) {
+            buff[cur] = temp & 0xFF;
+            ++cur;
+        }
     }
     return cur;
+}
+
+bool next_token(std::istream &is, std::string &tok) {
+    while (std::getline(is, tok, ' ')) {
+        if (!tok.size())
+            continue;
+        return true;
+    }
+    return false;
+}
+
+bool get_token_hex_byte(std::istream &is, uint8_t &out) {
+    // read next token
+    std::string tok;
+    if (!next_token(is, tok))
+        return false;
+    // parse token as hex byte
+    // if (sscanf(tok.c_str(), "%2x", &out) == 0)
+    char *endptr = nullptr;
+    errno = 0;
+    uint32_t temp = strtoul(tok.c_str(), &endptr, 16);
+    if (errno != 0 || endptr == nullptr)
+        return false;
+    out = temp & 0xFF;
+    return true;
 }
 
 
@@ -430,16 +469,9 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
     // build string stream, for simplifying our life (we don't care about performance)
     auto ss = std::stringstream(cmd);
 
-    // check if empty
-    if (ss.eof())
-        return;
-
-    // check main command
+    // get token and exit if empty line
     std::string tok;
-    ss >> tok;
-
-    // skip empty command lines
-    if (!tok.size())
+    if (!next_token(ss, tok))
         return;
     
     // print command
@@ -477,6 +509,15 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
             terminated = true;
             return;
         }
+        else if (tok.compare("help") == 0) {
+            std::cout << "Available commands:\n"
+                      << " - quit: exit\n"
+                      << " - rf on/off: enable/disable RF field\n"
+                      << " - raw <hex bytes>: send raw PN53x command\n"
+                      << " - modes: list available modes\n"
+                      << " - srix: enter SRIX mode\n"
+                      << " - calypso: enter Calypso mode\n";
+        }
         else if (tok.compare("srix") == 0) {
             mode = MODE_SRIX;
             prompt = "srix> ";
@@ -499,6 +540,11 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
             mode = MODE_ROOT;
             prompt = "> ";
         }
+        else if (tok.compare("help") == 0) {
+            std::cout << "Mode: SRIX\nAvailable commands:\n"
+                      << " - exit, back: go back\n"
+                      << " - scan: scan for tags\n";
+        }
         else if (tok.compare("scan") == 0) {
             srix_scan(reader);
         }
@@ -510,6 +556,15 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
         if (tok.compare("exit") == 0 || tok.compare("back") == 0) {
             mode = MODE_ROOT;
             prompt = "> ";
+        }
+        else if (tok.compare("help") == 0) {
+            std::cout << "Mode: Calypso\nAvailable commands:\n"
+                      << " - exit, back: go back\n"
+                      << " - scan: scan for tags\n"
+                      << " - apdu <hex bytes>: send APDU\n"
+                      << " - select <filename>: select a file\n"
+                      << " - read_file <filename>: select and read a file\n"
+                      << " - read_rec <record_id>: read the specified record of the current selected file\n";
         }
         else if (tok.compare("scan") == 0) {
             calypso_scan(reader, uid, uid_size);
@@ -523,11 +578,15 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
                 typepreb_command(reader, tx, tx_len, nullptr, "APDU rx");
             }
         }
-        else if (tok.compare("select") == 0 || tok.compare("read") == 0) {
+        else if (tok.compare("select") == 0 || tok.compare("read_file") == 0) {
             // select/read file
             // read what file
             std::string tok2;
-            ss >> tok2;
+            if (!next_token(ss, tok2)) {
+                printf("Usage: %s <filename>\n", tok.c_str());
+                printf("Valid filenames: icc, envhol, evlog\n");
+                return;
+            }
             uint8_t id0, id1, id2, id3;
             if (tok2.compare("icc") == 0) {
                 id0 = 0x3F; id1 = 0x00; id2 = 0x00; id3 = 0x02;
@@ -548,6 +607,14 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
             } else {
                 calypso_select_and_read_file(reader, id0, id1, id2, id3);
             }
+        }
+        else if (tok.compare("read_rec") == 0) {
+            uint8_t record_id = 0;
+            if (!get_token_hex_byte(ss, record_id)) {
+                printf("Usage: read_rec <record_id>\n");
+                return;
+            }
+            calypso_read_records(reader, record_id, false);
         }
         else {
             ERROR("Unknown command '%s'", cmd.c_str());
