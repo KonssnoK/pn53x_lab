@@ -98,6 +98,8 @@ public:
     int send_command(const uint8_t *tx, int tx_len, const uint8_t **rx2 = NULL, const char *cmd_name = "Rx", bool verbose = true, bool dump_rx_ex = false) {
         static uint8_t rx[512];
         int res;
+        // TEMP:
+        memset(rx, 0, sizeof(rx));
         if ((res = pn53x_transceive(m_pnd, tx, tx_len, rx, sizeof(rx), 0)) < 0) {
             nfc_perror(m_pnd, cmd_name);
             if (rx2)
@@ -305,12 +307,89 @@ int typepreb_scan(PN53x *reader, uint8_t *uid, size_t &uid_size) {
     return 0;
 }
 
+int typepreb_disconnect(PN53x *reader) {
+    // type B': disconnect (42 01 03)
+    const uint8_t tx[] = {InCommunicateThru, 0x01, 0x03};
+    return reader->send_command(tx, 3, nullptr, "Disconnect");
+}
+
+int typepreb_command(PN53x *reader, const uint8_t *tx, size_t tx_len, const uint8_t **rx2, const char *cmd_name = "Command", uint8_t unk = 0x0E, bool dump_rx_ex = false) {
+    // type B': command
+    // 42 01 unk (len+2) 00 ... +[len bytes]
+    // unk can be 0x02, 0x04, 0x06, 0x08, 0x0A, 0x0C, 0x0E
+    // then that nibble is returned back
+    uint8_t tx2[5 + tx_len];
+    tx2[0] = InCommunicateThru; tx2[1] = 0x01; tx2[2] = unk & 0x0F; tx2[3] = tx_len + 2; tx2[4] = 0x00;
+    memcpy(tx2 + 5, tx, tx_len);
+    return reader->send_command(tx2, 5 + tx_len, rx2, cmd_name, true, dump_rx_ex);
+}
+
+#define SELECT_FILE                 0xA4
+#define READ_RECORDS                0xB2
+
 int calypso_setup(PN53x *reader) {
     return typepreb_setup(reader);
 }
 
 int calypso_scan(PN53x *reader, uint8_t *uid, size_t &uid_size) {
     return typepreb_scan(reader, uid, uid_size);
+}
+
+int calypso_select_file(PN53x *reader, uint8_t id0, uint8_t id1, uint8_t id2, uint8_t id3) {
+    const uint8_t tx[] = {
+        SELECT_FILE,
+        0x08, // select from MF (data field = path without the identifier of the MF)
+        0x00, // first record, return FCI
+        0x04, // length of data
+        id0, id1, id2, id3
+    };
+    const uint8_t *rx2 = nullptr;
+    int res = typepreb_command(reader, tx, tx[3] + 4, &rx2, "SELECT_FILE", 0x0A);
+    if (res < 0)
+        return -1;
+    // 00  01  (40 | cnt)  (len data + 1) [data]
+    // check received status
+    if (rx2[0] != 0x00) {
+        ERROR("Unknown status received '%02X'", rx2[0]);
+        return -1;
+    }
+    return 0;
+}
+
+int calypso_read_records(PN53x *reader, uint8_t record_id = 0x01) {
+    // https://cardwerk.com/smart-card-standard-iso7816-4-section-6-basic-interindustry-commands
+    // section 6.5
+
+    // b2 01 04 1d
+
+    // NOTE: unk (passed to typepreb_command) must be different from the one used for
+    // selecting the file! why is that? boh
+
+    const uint8_t tx[] = {
+        READ_RECORDS,
+        record_id, // NOTE: 0x00 indicates current record
+        0x05, // 0x04 = read record P1, 0x05 = read records from P1 to last, 0x06 = read records from last to P1
+        0x00 // length
+    };
+    const uint8_t *rx2 = nullptr;
+    int res = typepreb_command(reader, tx, tx[3] + 4, &rx2, "READ_RECORDS", 0x0C, true);
+    if (res < 0)
+        return -1;
+    // 00  01  (40 | cnt)  (len data + 1) [data]
+    // check received status
+    if (rx2[0] != 0x00) {
+        ERROR("Unknown status received '%02X'", rx2[0]);
+        return -1;
+    }
+    return 0;
+}
+
+int calypso_select_and_read_file(PN53x *reader, uint8_t id0, uint8_t id1, uint8_t id2, uint8_t id3) {
+    // select file
+    if (calypso_select_file(reader, id0, id1, id2, id3) < 0)
+        return -1;
+    // read file
+    return calypso_read_records(reader);
 }
 
 // ============================================================================
@@ -434,6 +513,41 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
         }
         else if (tok.compare("scan") == 0) {
             calypso_scan(reader, uid, uid_size);
+        }
+        else if (tok.compare("apdu") == 0) {
+            uint8_t tx[MAX_FRAME_LEN];
+            size_t tx_len = read_hex_bytes(ss, tx, sizeof(tx));
+            if (tx_len > 0) {
+                printf("APDU tx: ");
+                print_hex(tx, tx_len);
+                typepreb_command(reader, tx, tx_len, nullptr, "APDU rx");
+            }
+        }
+        else if (tok.compare("select") == 0 || tok.compare("read") == 0) {
+            // select/read file
+            // read what file
+            std::string tok2;
+            ss >> tok2;
+            uint8_t id0, id1, id2, id3;
+            if (tok2.compare("icc") == 0) {
+                id0 = 0x3F; id1 = 0x00; id2 = 0x00; id3 = 0x02;
+            }
+            else if (tok2.compare("envhol") == 0) {
+                id0 = 0x20; id1 = 0x00; id2 = 0x20; id3 = 0x01;
+            }
+            else if (tok2.compare("evlog") == 0) {
+                id0 = 0x20; id1 = 0x00; id2 = 0x20; id3 = 0x10;
+            }
+            else {
+                ERROR("Unknown file identifier '%s'", tok2.c_str());
+                return;
+            }
+            // select only or read?
+            if (tok.compare("select") == 0) {
+                calypso_select_file(reader, id0, id1, id2, id3);
+            } else {
+                calypso_select_and_read_file(reader, id0, id1, id2, id3);
+            }
         }
         else {
             ERROR("Unknown command '%s'", cmd.c_str());
