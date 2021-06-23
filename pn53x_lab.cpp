@@ -325,11 +325,74 @@ int typepreb_command(PN53x *reader, const uint8_t *tx, size_t tx_len, const uint
     unk += 2; if (unk == 0) unk = 2; // TODO: understand what this is
     tx2[0] = InCommunicateThru; tx2[1] = 0x01; tx2[2] = unk & 0x0F; tx2[3] = tx_len + 2; tx2[4] = 0x00;
     memcpy(tx2 + 5, tx, tx_len);
-    return reader->send_command(tx2, 5 + tx_len, rx2, cmd_name, true, dump_rx_ex);
+    int ret = reader->send_command(tx2, 5 + tx_len, rx2, cmd_name, true, dump_rx_ex);
+    if (ret <= 0)
+        return ret;
+    // parse response
+    // 00 01 (4 | unk) len +[len-1 bytes]
+    if (rx2 != nullptr) {
+        if ((*rx2)[0] != 0x00) {
+            ERROR("Unknown status received '%02X'", (*rx2)[0]);
+            return -1;
+        }
+        // make rx2 point to the actual length + returned data
+        *rx2 += 3;
+    }
+    // return the correct length
+    return ret - 3;
 }
 
+
 #define SELECT_FILE                 0xA4
+#define READ_BINARY                 0xB0
 #define READ_RECORDS                0xB2
+#define WRITE_BINARY                0xD0
+#define WRITE_RECORD                0xD2
+
+
+int iso7816_check_response(const uint8_t *rx, size_t rx_len) {
+    // check received sw1 and sw2
+    uint8_t sw1 = rx[rx_len - 2];
+    uint8_t sw2 = rx[rx_len - 1];
+    const char *warn = nullptr;
+    const char *err = nullptr;
+    if (sw1 == 0x62) {
+        if (sw2 == 0x81) warn = "Part of returned data may be corrupted";
+        else if (sw2 == 0x82) warn = "End of file reached befeore reading Le bytes";
+        else if ((sw2 & 0xF0) == 0xC0) warn = "Successful writing, but after using an internal retry routine";  // 'X'!='0' indicates the number of retries: 'X'='0' means that no counter is provided).
+    } else if (sw1 == 0x65) {
+        if (sw2 == 0x81) err = "Memory failure (unsuccessful writing)";
+    } else if (sw1 == 0x67) {
+        if (sw2 == 0x00) err = "Wrong length (wrong Le field)";
+    } else if (sw1 == 0x69) {
+        if (sw2 == 0x81) err = "Command incompatible with file structure";
+        else if (sw2 == 0x82) err = "Security status not satisfied";
+        else if (sw2 == 0x86) err = "Command not allowed (no current EF)";
+    } else if (sw1 == 0x6A) {
+        if (sw2 == 0x81) err = "Function not supported";
+        else if (sw2 == 0x82) err = "File not found";
+        else if (sw2 == 0x83) err = "Record not found";
+        else if (sw2 == 0x84) err = "Not enough memory space in the file";
+        else if (sw2 == 0x85) err = "Lc inconsistent with TLV structure";
+    } else if (sw1 == 0x6B) {
+        if (sw2 == 0x00) err = "Wrong parameters (offset outside the EF)";
+    } else if (sw1 == 0x6C) {
+        err = "Wrong length (Le field indicated in SW2";
+    } else if (sw1 == 0x6D) {
+        if (sw2 == 0x00) err = "Instruction code not supported or invalid";
+        else err = "Instruction code not programmed or invalid (procedure byte), (ISO 7816-3)";
+    }
+    printf("SW1 = %02X, SW2 = %02X%s\n", sw1, sw2, ((sw1 == 0x90 && sw2 == 0x00 ? "" : "   !!!")));
+    if (err) {
+        printf("ERROR: %s\n", err);
+        return -1;
+    }
+    if (warn) {
+        printf("Warning: %s\n", warn);
+    }
+    return 0;
+}
+
 
 int calypso_setup(PN53x *reader) {
     return typepreb_setup(reader);
@@ -343,7 +406,7 @@ int calypso_select_file(PN53x *reader, uint8_t id0, uint8_t id1, uint8_t id2, ui
     const uint8_t tx[] = {
         SELECT_FILE,
         0x08, // select from MF (data field = path without the identifier of the MF)
-        0x00, // first record, return FCI
+        0x00, // first record, return FCI, FCP = 0x04, FMD = 0x08
         0x04, // length of data
         id0, id1, id2, id3
     };
@@ -351,18 +414,16 @@ int calypso_select_file(PN53x *reader, uint8_t id0, uint8_t id1, uint8_t id2, ui
     int res = typepreb_command(reader, tx, tx[3] + 4, &rx2, "SELECT_FILE");
     if (res < 0)
         return -1;
-    // 00  01  (40 | cnt)  (len data + 1) [data]
-    // check received status
-    if (rx2[0] != 0x00) {
-        ERROR("Unknown status received '%02X'", rx2[0]);
+    
+    if (iso7816_check_response(rx2, res) < 0)
         return -1;
-    }
     return 0;
 }
 
 int calypso_read_records(PN53x *reader, uint8_t record_id = 0x01, bool read_all = true) {
     // https://cardwerk.com/smart-card-standard-iso7816-4-section-6-basic-interindustry-commands
-    // section 6.5
+    // http://www.ttfn.net/techno/smartcards/iso7816_4.html#ss6_5
+    // section 6.5 - READ RECORDS
 
     // b2 01 04 1d
 
@@ -371,20 +432,19 @@ int calypso_read_records(PN53x *reader, uint8_t record_id = 0x01, bool read_all 
 
     const uint8_t tx[] = {
         READ_RECORDS,
-        record_id, // NOTE: 0x00 indicates current record
-        read_all ? (uint8_t) 0x05 : (uint8_t) 0x04, // 0x04 = read record P1, 0x05 = read records from P1 to last, 0x06 = read records from last to P1
-        0x00 // length
+        record_id, // P1: NOTE: 0x00 indicates current record
+        read_all ? (uint8_t) 0x05 : (uint8_t) 0x04, // P2: 0x04 = read record P1, 0x05 = read records from P1 to last, 0x06 = read records from last to P1
+        // no Lc
+        // no Data
+        0x00 // Le: length
     };
     const uint8_t *rx2 = nullptr;
     int res = typepreb_command(reader, tx, tx[3] + 4, &rx2, "READ_RECORDS", true);
     if (res < 0)
         return -1;
-    // 00  01  (40 | cnt)  (len data + 1) [data]
-    // check received status
-    if (rx2[0] != 0x00) {
-        ERROR("Unknown status received '%02X'", rx2[0]);
+    
+    if (iso7816_check_response(rx2, res) < 0)
         return -1;
-    }
     return 0;
 }
 
@@ -394,6 +454,67 @@ int calypso_select_and_read_file(PN53x *reader, uint8_t id0, uint8_t id1, uint8_
         return -1;
     // read file
     return calypso_read_records(reader);
+}
+
+int calypso_read_binary(PN53x *reader) {
+    // https://cardwerk.com/smart-card-standard-iso7816-4-section-6-basic-interindustry-commands
+    // section 6.1 - READ BINARY
+
+    // b0 00 00 ff
+    // if p1 = 00 and p2 = 00 then offset = 0
+
+    const uint8_t tx[] = {
+        READ_BINARY,
+        0x00,
+        0x00,
+        0x00 // length
+    };
+    const uint8_t *rx2 = nullptr;
+    int res = typepreb_command(reader, tx, 4, &rx2, "READ_BINARY", true);
+    if (res < 0)
+        return -1;
+    
+    if (iso7816_check_response(rx2, res) < 0)
+        return -1;
+    
+    return 0;
+}
+
+int calypso_write_record(PN53x *reader, uint8_t record_id, const uint8_t *data, size_t data_size) {
+    // https://cardwerk.com/smart-card-standard-iso7816-4-section-6-basic-interindustry-commands
+    // section 6.6 - WRITE RECORD
+
+    /*
+    Tx: 42  01  0a  06  00  b2  01  04  00  
+    THE RECORD:
+    00) 00 01 4A 20
+                    78 4C 61 1B   |  ..J xLa.
+    08) 07 24 00 0D 01 28 F7 3D   |  .$...(.=
+    10) 00 00 00 00 00 00 00 00   |  ........
+    18) 00 00 00 00 00 00 00 00   |  ........
+    20) 00
+           90 00                  |  ...
+    */
+
+    // 78 4C 61 1B 07 24 00 0D 01 28 F7 3D 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+    // 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F 10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D
+
+    // d2 <record_id> 04 <len> <data>
+
+    uint8_t tx[4 + data_size];
+    tx[0] = WRITE_RECORD;
+    tx[1] = record_id;  // P1: NOTE: 0x00 indicates current record
+    tx[2] = 0x04;  // P2: 0x04 = read record P1
+    tx[3] = (uint8_t) data_size;  // length
+    memcpy(tx + 4, data, data_size);
+    const uint8_t *rx2 = nullptr;
+    int res = typepreb_command(reader, tx, 4 + data_size, &rx2, "WRITE_RECORD");
+    if (res < 0)
+        return -1;
+    
+    if (iso7816_check_response(rx2, res) < 0)
+        return -1;
+    return 0;
 }
 
 // ============================================================================
@@ -563,8 +684,11 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
                       << " - scan: scan for tags\n"
                       << " - apdu <hex bytes>: send APDU\n"
                       << " - select <filename>: select a file\n"
+                      << " - select_id <id, 4 hex bytes>: select a file by id\n"
                       << " - read_file <filename>: select and read a file\n"
-                      << " - read_rec <record_id>: read the specified record of the current selected file\n";
+                      << " - read_bin: read the current selected file\n"
+                      << " - read_rec <record_id>: read the specified record of the current selected file\n"
+                      << " - write_rec <record_i> <hex bytes>: write on the specified record of the current selected file\n";
         }
         else if (tok.compare("scan") == 0) {
             calypso_scan(reader, uid, uid_size);
@@ -575,7 +699,10 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
             if (tx_len > 0) {
                 printf("APDU tx: ");
                 print_hex(tx, tx_len);
-                typepreb_command(reader, tx, tx_len, nullptr, "APDU rx");
+                const uint8_t *rx = nullptr;
+                int ret = typepreb_command(reader, tx, tx_len, &rx, "APDU rx");
+                if (ret > 0)
+                    iso7816_check_response(rx, ret);
             }
         }
         else if (tok.compare("select") == 0 || tok.compare("read_file") == 0) {
@@ -608,6 +735,17 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
                 calypso_select_and_read_file(reader, id0, id1, id2, id3);
             }
         }
+        else if (tok.compare("select_id") == 0) {
+            uint8_t id0, id1, id2, id3;
+            if (!get_token_hex_byte(ss, id0) ||
+                !get_token_hex_byte(ss, id1) ||
+                !get_token_hex_byte(ss, id2) ||
+                !get_token_hex_byte(ss, id3)) {
+                printf("Usage: select_id <id, 4 hex bytes>\n");
+                return;
+            }
+            calypso_select_file(reader, id0, id1, id2, id3);
+        }
         else if (tok.compare("read_rec") == 0) {
             uint8_t record_id = 0;
             if (!get_token_hex_byte(ss, record_id)) {
@@ -615,6 +753,23 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
                 return;
             }
             calypso_read_records(reader, record_id, false);
+        }
+        else if (tok.compare("read_bin") == 0) {
+            calypso_read_binary(reader);
+        }
+        else if (tok.compare("write_rec") == 0) {
+            uint8_t record_id = 0;
+            if (!get_token_hex_byte(ss, record_id)) {
+                printf("Usage: write_rec <record_id> <hex bytes>\n");
+                return;
+            }
+            uint8_t tx[MAX_FRAME_LEN];
+            size_t tx_len = read_hex_bytes(ss, tx, sizeof(tx));
+            if (!tx_len) {
+                printf("Usage: write_rec <record_id> <hex bytes>\n");
+                return;
+            }
+            calypso_write_record(reader, record_id, tx, tx_len);
         }
         else {
             ERROR("Unknown command '%s'", cmd.c_str());
