@@ -38,6 +38,39 @@ extern "C" {
 #define ERROR(...)              { std::cout << "[ERROR] "; printf(__VA_ARGS__); std::cout << std::endl; }
 
 
+
+void dump_hex_ascii(const uint8_t *rx, int res, bool dump_address = true) {
+    int i = 0;
+    const int row_size = 8;
+    while (i < res) {
+        if (dump_address)
+            printf("%02X) ", i);
+        for (int j = 0; j < row_size; ++j) {
+            if (i + j < res) {
+                printf("%02X ", rx[i + j]);
+            } else {
+                printf("   ");
+            }
+        }
+        printf("  |  ");
+        for (int j = 0; j < row_size; ++j) {
+            if (i + j < res) {
+                if (isprint(rx[i + j])) {
+                    printf("%c", rx[i + j]);
+                } else {
+                    printf(".");
+                }
+            } else {
+                break;
+            }
+        }
+        printf("\n");
+        i += row_size;
+    }
+}
+
+
+
 // ============================================================================
 
 #define MAX_FRAME_LEN 264
@@ -95,11 +128,13 @@ public:
         }
     }
 
-    int send_command(const uint8_t *tx, int tx_len, const uint8_t **rx2 = NULL, const char *cmd_name = "Rx", bool verbose = true, bool dump_rx_ex = false) {
+    int send_command(const uint8_t *tx, int tx_len, const uint8_t **rx2 = NULL, const char *cmd_name = "Rx", bool verbose = true, bool dump_rx_ex = false, bool dump_tx = true) {
         static uint8_t rx[512];
         int res;
-        printf("Tx: ");
-        print_hex(tx, tx_len);
+        if (verbose && dump_tx) {
+            printf("Tx: ");
+            print_hex(tx, tx_len);
+        }
         // TEMP:
         memset(rx, 0, sizeof(rx));
         if ((res = pn53x_transceive(m_pnd, tx, tx_len, rx, sizeof(rx), 0)) < 0) {
@@ -114,32 +149,7 @@ public:
                 print_hex(rx, res);
             } else {
                 printf("%s:\n", cmd_name);
-                int i = 0;
-                const int row_size = 8;
-                while (i < res) {
-                    printf("%02X) ", i);
-                    for (int j = 0; j < row_size; ++j) {
-                        if (i + j < res) {
-                            printf("%02X ", rx[i + j]);
-                        } else {
-                            printf("   ");
-                        }
-                    }
-                    printf("  |  ");
-                    for (int j = 0; j < row_size; ++j) {
-                        if (i + j < res) {
-                            if (isprint(rx[i + j])) {
-                                printf("%c", rx[i + j]);
-                            } else {
-                                printf(".");
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    printf("\n");
-                    i += row_size;
-                }
+                dump_hex_ascii(rx, res);
             }
         }
         if (rx2)
@@ -272,6 +282,97 @@ int srix_scan(PN53x *reader) {
     tx[1] = 0x0B;
     if (reader->send_command(tx, 2, &rx2, "SRIX get UID") < 0)
         return -1;
+    return 0;
+}
+
+int srix_read_block(PN53x *reader, uint8_t block_id, const uint8_t **rx2) {
+    // read block (08 block_id)
+    const uint8_t tx[3] = {InCommunicateThru, 0x08, block_id};
+    int ret = reader->send_command(tx, 3, rx2, "SRIX read block", false);
+    if (ret < 0)
+        return ret;
+    // expected 5 bytes, unk + block (4 bytes)
+    // skip first byte
+    if (rx2)
+        ++(*rx2);
+    return ret - 1;
+}
+
+int srix_write_block(PN53x *reader, uint8_t block_id, const uint8_t *data) {
+    // write block (09 block_id data (4 bytes))
+    const uint8_t tx[] = {InCommunicateThru, 0x09, block_id, data[0], data[1], data[2], data[3]};
+    int ret = reader->send_command(tx, sizeof(tx), nullptr, "SRIX write block", false);
+    // TODO: do not wait for any response!
+    // if (ret < 0)
+    //    return ret;
+    // read block, to check
+    const uint8_t *rx2 = nullptr;
+    ret = srix_read_block(reader, block_id, &rx2);
+    if (ret < 0) {
+        ERROR("Could not read back block %02X", block_id);
+        return -1;
+    }
+    // check
+    if (ret != 4 || rx2[0] != data[0] || rx2[1] != data[1] || rx2[2] != data[2] || rx2[3] != data[3]) {
+        ERROR("Error writing block %02X (wrote '%2X %2X %2X %2X', read back '%2X %2X %2X %2X')",
+              block_id, data[0], data[1], data[2], data[3], rx2[0], rx2[1], rx2[2], rx2[3]);
+        return -1;
+    }
+    return 0;
+}
+
+int srix_read_all(PN53x *reader) {
+    // scan
+    if (srix_scan(reader) < 0)
+        return -1;
+    // read blocks
+    const uint8_t *rx2 = nullptr;
+    for (uint8_t block_id = 0; block_id < 128; ++block_id) {
+        if (srix_read_block(reader, block_id, &rx2) < 0) {
+            printf("Error reading block %2X\n", block_id);
+        } else {
+            // printf("[%02X] %02X %02X %02X %02X\n", block_id, rx2[0], rx2[1], rx2[2], rx2[3]);
+            printf("[%02X] ", block_id);
+            dump_hex_ascii(rx2, 4, false);
+        }
+    }
+    // read system area
+    if (srix_read_block(reader, 0xFF, &rx2) < 0) {
+        printf("Error reading system area\n");
+    } else {
+        printf("[%02X] %02X %02X %02X %02X\n", 0xFF, rx2[0], rx2[1], rx2[2], rx2[3]);
+    }
+    return 0;
+}
+
+int srix_check_writable(PN53x *reader) {
+    const uint8_t *rx2 = nullptr;
+    int writable = 0;
+    // NOTE: skipping first 5 blocks, as OTP, and next 2 blocks, as binary counters, as
+    // writing them means not being able to rewrite them back to the original value!
+    for (uint8_t block_id = 7; block_id < 128; ++block_id) {
+        // try to read block
+        if (srix_read_block(reader, block_id, &rx2) < 0) {
+            printf("=> Block %02X not readable\n", block_id);
+            continue;
+        }
+        // save block data
+        uint8_t data[4] = {rx2[0], rx2[1], rx2[2], rx2[3]};
+        // try to write block
+        uint8_t data2[4] = {0x12, 0x34, 0x56, 0x78};
+        if (srix_write_block(reader, block_id, data2) < 0) {
+            printf("=> Block %02X not writable\n", block_id);
+            continue;
+        }
+        // write back old data
+        if (srix_write_block(reader, block_id, data) < 0) {
+            printf("=> Error writing the second time to block %02X!!!\n", block_id);
+            continue;
+        }
+        printf("=> Block %02X writable!\n", block_id);
+        ++writable;
+    }
+    printf("%i writable blocks found\n", writable);
     return 0;
 }
 
@@ -567,6 +668,15 @@ bool get_token_hex_byte(std::istream &is, uint8_t &out) {
 }
 
 
+typedef struct Dump {
+    uint8_t blocks[512][32];
+    uint8_t block_size = 0;
+    int num_blocks = 0;
+    size_t max_block_size = 32;
+    int max_num_blocks = 512;
+} Dump;
+
+
 typedef enum {
     MODE_ROOT = 0,
     MODE_SRIX = 1,
@@ -582,6 +692,8 @@ public:
     
     uint8_t uid[16];
     size_t uid_size = 0;
+
+    Dump dump;    
 
     void execute(const std::string &cmd, bool echo_cmd = false);
 };
@@ -625,6 +737,50 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
             reader->send_command(tx, tx_len, nullptr, "Raw rx", true, true);
         }
     }
+    else if (tok.compare("load_dump") == 0) {
+        std::string filename;
+        if (!next_token(ss, filename)) {
+            printf("Usage: load_dump <filename> (without spaces!)\n");
+            return;
+        }
+        // open file
+        std::ifstream fs;
+        fs.open(filename, std::fstream::in);
+        if (!fs) {
+            ERROR("Could not open input file '%s'", filename.c_str());
+            return;
+        }
+        int block_id = 0;
+        int block_size = -1;
+        std::string tok2;
+        while (std::getline(fs, tok2) && block_id < dump.max_num_blocks) {
+            std::stringstream ss2(tok2);
+            int cur_byte = 0;
+
+            // TEMP: skip first token for now, which is the block id "[%02X]"
+            std::string tok3;
+            next_token(ss2, tok3);
+
+            while (get_token_hex_byte(ss2, dump.blocks[block_id][cur_byte]) && cur_byte < dump.max_block_size) {
+                ++cur_byte;
+            }
+            if (block_size < 0) {
+                block_size = cur_byte;
+                dump.block_size = cur_byte;
+            } else if (cur_byte != block_size) {
+                ERROR("Block %i has %i bytes instead of %i\n", block_id, cur_byte, block_size);
+                return;
+            }
+            ++block_id;
+        }
+        dump.num_blocks = block_id;
+        printf("%i blocks of %i bytes read\n", dump.num_blocks, dump.block_size);
+        // dump dump
+        for (int i = 0; i < dump.num_blocks; ++i) {
+            printf("[%02X] ", i);
+            dump_hex_ascii(dump.blocks[i], dump.block_size, false);
+        }
+    }
     else if (mode == MODE_ROOT) {
         if (tok.compare("exit") == 0 || tok.compare("back") == 0) {
             terminated = true;
@@ -635,6 +791,7 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
                       << " - quit: exit\n"
                       << " - rf on/off: enable/disable RF field\n"
                       << " - raw <hex bytes>: send raw PN53x command\n"
+                      << " - load_dump: <filename>: load a dump\n"
                       << " - modes: list available modes\n"
                       << " - srix: enter SRIX mode\n"
                       << " - calypso: enter Calypso mode\n";
@@ -664,10 +821,50 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
         else if (tok.compare("help") == 0) {
             std::cout << "Mode: SRIX\nAvailable commands:\n"
                       << " - exit, back: go back\n"
-                      << " - scan: scan for tags\n";
+                      << " - scan: scan for tags\n"
+                      << " - read: read a tag\n"
+                      << " - read_block <block_id>: read single block\n"
+                      << " - write_block <block_id> <data0> <data1> <data2> <data3>: write a block\n"
+                      << " - check_writable: check which blocks are writable\n"
+                      << " - write_dump: write buffer to tag\n";
         }
         else if (tok.compare("scan") == 0) {
             srix_scan(reader);
+        }
+        else if (tok.compare("read") == 0) {
+            srix_read_all(reader);
+        }
+        else if (tok.compare("read_block") == 0) {
+            uint8_t block_id;
+            if (!get_token_hex_byte(ss, block_id)) {
+                printf("Usage: read_block <block_id>\n");
+                return;
+            }
+            const uint8_t *rx2 = nullptr;
+            int ret = srix_read_block(reader, block_id, &rx2);
+            if (ret > 0) {
+                dump_hex_ascii(rx2, ret, false);
+            }
+        }
+        else if (tok.compare("write_block") == 0) {
+            uint8_t block_id, d[4];
+            if (!get_token_hex_byte(ss, block_id) ||
+                !get_token_hex_byte(ss, d[0]) ||
+                !get_token_hex_byte(ss, d[1]) ||
+                !get_token_hex_byte(ss, d[2]) ||
+                !get_token_hex_byte(ss, d[3])) {
+                printf("Usage: write_block <block_id> <data0> <data1> <data2> <data3>\n");
+                return;
+            }
+            srix_write_block(reader, block_id, d);
+        }
+        else if (tok.compare("check_writable") == 0) {
+            srix_check_writable(reader);
+        }
+        else if (tok.compare("write_dump") == 0) {
+            for (int i = 0; i < dump.num_blocks; ++i) {
+                srix_write_block(reader, i, dump.blocks[i]);
+            }
         }
         else {
             ERROR("Unknown command '%s'", cmd.c_str());
@@ -806,7 +1003,8 @@ int main(int argc, char **argv) {
     shell.reader = &reader;
 
     // init commands
-    shell.execute("calypso", true);
+    // shell.execute("calypso", true);
+    shell.execute("srix", true);
     shell.execute("scan", true);
 
     // internal shell loop
