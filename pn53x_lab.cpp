@@ -23,7 +23,7 @@
             nanosleep(&xsleep, NULL); \
         } while (0)
 #else
-    #include <winbase.h>
+    #include <windows.h>
     #define msleep Sleep
 #endif
 
@@ -422,11 +422,12 @@ int typepreb_command(PN53x *reader, const uint8_t *tx, size_t tx_len, const uint
     // unk can be 0x02, 0x04, 0x06, 0x08, 0x0A, 0x0C, 0x0E
     // then that nibble is returned back
     static uint8_t unk = 2;
-    uint8_t tx2[5 + tx_len];
+    uint8_t *tx2 = new uint8_t[5 + tx_len];
     unk += 2; if (unk == 0) unk = 2; // TODO: understand what this is
     tx2[0] = InCommunicateThru; tx2[1] = 0x01; tx2[2] = unk & 0x0F; tx2[3] = tx_len + 2; tx2[4] = 0x00;
     memcpy(tx2 + 5, tx, tx_len);
     int ret = reader->send_command(tx2, 5 + tx_len, rx2, cmd_name, true, dump_rx_ex);
+    delete tx2;
     if (ret <= 0)
         return ret;
     // parse response
@@ -602,7 +603,7 @@ int calypso_write_record(PN53x *reader, uint8_t record_id, const uint8_t *data, 
 
     // d2 <record_id> 04 <len> <data>
 
-    uint8_t tx[4 + data_size];
+    uint8_t *tx = new uint8_t[4 + data_size];
     tx[0] = WRITE_RECORD;
     tx[1] = record_id;  // P1: NOTE: 0x00 indicates current record
     tx[2] = 0x04;  // P2: 0x04 = read record P1
@@ -610,6 +611,7 @@ int calypso_write_record(PN53x *reader, uint8_t record_id, const uint8_t *data, 
     memcpy(tx + 4, data, data_size);
     const uint8_t *rx2 = nullptr;
     int res = typepreb_command(reader, tx, 4 + data_size, &rx2, "WRITE_RECORD");
+    delete tx;
     if (res < 0)
         return -1;
     
