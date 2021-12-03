@@ -445,6 +445,7 @@ int typepreb_command(PN53x *reader, const uint8_t *tx, size_t tx_len, const uint
 }
 
 
+#define VERIFY                      0x20
 #define SELECT_FILE                 0xA4
 #define READ_BINARY                 0xB0
 #define READ_RECORDS                0xB2
@@ -462,6 +463,9 @@ int iso7816_check_response(const uint8_t *rx, size_t rx_len) {
         if (sw2 == 0x81) warn = "Part of returned data may be corrupted";
         else if (sw2 == 0x82) warn = "End of file reached befeore reading Le bytes";
         else if ((sw2 & 0xF0) == 0xC0) warn = "Successful writing, but after using an internal retry routine";  // 'X'!='0' indicates the number of retries: 'X'='0' means that no counter is provided).
+    } else if (sw1 == 0x63) {
+        if (sw2 == 0x00) warn = "No information given(verification failed)";
+        else if ((sw2 & 0xF0) == 0xC0) warn = "Verification failed. CX further retries allowed";
     } else if (sw1 == 0x65) {
         if (sw2 == 0x81) err = "Memory failure (unsuccessful writing)";
     } else if (sw1 == 0x67) {
@@ -469,6 +473,8 @@ int iso7816_check_response(const uint8_t *rx, size_t rx_len) {
     } else if (sw1 == 0x69) {
         if (sw2 == 0x81) err = "Command incompatible with file structure";
         else if (sw2 == 0x82) err = "Security status not satisfied";
+        else if (sw2 == 0x83) err = "Authentication method blocked";
+        else if (sw2 == 0x84) err = "Referenced data invalidated";
         else if (sw2 == 0x86) err = "Command not allowed (no current EF)";
     } else if (sw1 == 0x6A) {
         if (sw2 == 0x81) err = "Function not supported";
@@ -476,6 +482,8 @@ int iso7816_check_response(const uint8_t *rx, size_t rx_len) {
         else if (sw2 == 0x83) err = "Record not found";
         else if (sw2 == 0x84) err = "Not enough memory space in the file";
         else if (sw2 == 0x85) err = "Lc inconsistent with TLV structure";
+        else if (sw2 == 0x86) err = "Incorrect parameters P1-P2";
+        else if (sw2 == 0x88) err = "Referenced data not found";
     } else if (sw1 == 0x6B) {
         if (sw2 == 0x00) err = "Wrong parameters (offset outside the EF)";
     } else if (sw1 == 0x6C) {
@@ -483,6 +491,8 @@ int iso7816_check_response(const uint8_t *rx, size_t rx_len) {
     } else if (sw1 == 0x6D) {
         if (sw2 == 0x00) err = "Instruction code not supported or invalid";
         else err = "Instruction code not programmed or invalid (procedure byte), (ISO 7816-3)";
+    } else if (sw1 == 0x6E) {
+        if (sw2 == 0x00) err = "Class not supported";
     }
     printf("SW1 = %02X, SW2 = %02X%s\n", sw1, sw2, ((sw1 == 0x90 && sw2 == 0x00 ? "" : "   !!!")));
     if (err) {
@@ -615,6 +625,24 @@ int calypso_write_record(PN53x *reader, uint8_t record_id, const uint8_t *data, 
     if (res < 0)
         return -1;
     
+    if (iso7816_check_response(rx2, res) < 0)
+        return -1;
+    return 0;
+}
+
+int calypso_verify(PN53x* reader)
+{
+    const uint8_t tx[] = {
+        VERIFY,
+        0x00, // P1 alwys 00
+        0x80, // P2
+        0x00
+    };
+    const uint8_t* rx2 = nullptr;
+    int res = typepreb_command(reader, tx, 4, &rx2, "VERIFY");
+    if (res < 0)
+        return -1;
+
     if (iso7816_check_response(rx2, res) < 0)
         return -1;
     return 0;
@@ -879,15 +907,16 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
         }
         else if (tok.compare("help") == 0) {
             std::cout << "Mode: Calypso\nAvailable commands:\n"
-                      << " - exit, back: go back\n"
-                      << " - scan: scan for tags\n"
-                      << " - apdu <hex bytes>: send APDU\n"
-                      << " - select <filename>: select a file\n"
-                      << " - select_id <id, 4 hex bytes>: select a file by id\n"
-                      << " - read_file <filename>: select and read a file\n"
-                      << " - read_bin: read the current selected file\n"
-                      << " - read_rec <record_id>: read the specified record of the current selected file\n"
-                      << " - write_rec <record_i> <hex bytes>: write on the specified record of the current selected file\n";
+                << " - exit, back: go back\n"
+                << " - scan: scan for tags\n"
+                << " - apdu <hex bytes>: send APDU\n"
+                << " - select <filename>: select a file\n"
+                << " - select_id <id, 4 hex bytes>: select a file by id\n"
+                << " - read_file <filename>: select and read a file\n"
+                << " - read_bin: read the current selected file\n"
+                << " - read_rec <record_id>: read the specified record of the current selected file\n"
+                << " - write_rec <record_i> <hex bytes>: write on the specified record of the current selected file\n"
+                << " - verify";
         }
         else if (tok.compare("scan") == 0) {
             calypso_scan(reader, uid, uid_size);
@@ -1007,6 +1036,9 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
                 return;
             }
             calypso_write_record(reader, record_id, tx, tx_len);
+        }
+        else if (tok.compare("verify") == 0) {
+            calypso_verify(reader);
         }
         else {
             ERROR("Unknown command '%s'", cmd.c_str());
