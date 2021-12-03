@@ -905,18 +905,6 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
             }
         }
         else if (tok.compare("select") == 0 || tok.compare("read_file") == 0) {
-            // Discovered files
-            // 
-            // 00 00 00 Folder
-            //          02 03 Files
-            // 01 00 00 Folder
-            //          02 03 Files
-            // 10 00 10 Folder
-            //          00 04 14 15 Files
-            // 20 00 20 Folder
-            //          00 01 04 10 20 2A 2B 2C 2D 30 40 50 Files
-            // 3F 00 00 Folder
-            //          02 03 Files
             // select/read file
             // read what file
             std::string tok2;
