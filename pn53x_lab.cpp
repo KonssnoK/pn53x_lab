@@ -905,6 +905,18 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
             }
         }
         else if (tok.compare("select") == 0 || tok.compare("read_file") == 0) {
+            // Discovered files
+            // 
+            // 00 00 00 Folder
+            //          02 03 Files
+            // 01 00 00 Folder
+            //          02 03 Files
+            // 10 00 10 Folder
+            //          00 04 14 15 Files
+            // 20 00 20 Folder
+            //          00 01 04 10 20 2A 2B 2C 2D 30 40 50 Files
+            // 3F 00 00 Folder
+            //          02 03 Files
             // select/read file
             // read what file
             std::string tok2;
@@ -917,10 +929,6 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
             if (tok2.compare("icc") == 0) {
                 id0 = 0x3F; id1 = 0x00; id2 = 0x00; id3 = 0x02;
             }
-            // Not in ATM cards
-            // else if (tok2.compare("holder") == 0) {
-            //     id0 = 0x3F; id1 = 0x00; id2 = 0x3F; id3 = 0x1C;
-            // }
             else if (tok2.compare("envhol") == 0) {
                 id0 = 0x20; id1 = 0x00; id2 = 0x20; id3 = 0x01;
             }
@@ -933,10 +941,6 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
             else if (tok2.compare("contra") == 0) {
                 id0 = 0x20; id1 = 0x00; id2 = 0x20; id3 = 0x20;
             }
-            // Not in ATM cards
-            // else if (tok2.compare("counter") == 0) {
-            //     id0 = 0x20; id1 = 0x00; id2 = 0x20; id3 = 0x69;
-            // }
             else if (tok2.compare("specev") == 0) {
                 id0 = 0x20; id1 = 0x00; id2 = 0x20; id3 = 0x40;
             }
@@ -967,6 +971,29 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
                 return;
             }
             calypso_select_file(reader, id0, id1, id2, id3);
+        }
+        else if (tok.compare("select_force") == 0) {
+            // Force selection of available files given a partial ID
+            uint8_t id0, id1, id2;
+            if (!get_token_hex_byte(ss, id0) ||
+                !get_token_hex_byte(ss, id1) ||
+                !get_token_hex_byte(ss, id2)) {
+                printf("Usage: select_force <3 hex bytes>\n");
+                return;
+            }
+            uint8_t map[256] = { 0 };
+            for (int i = 0; i <= 0xFF; ++i) {
+                if (!calypso_select_file(reader, id0, id1, id2, i)) {
+                    map[i] = 1;
+                }
+            }
+            printf("DISCOVERED MAP\n");
+            for (int i = 0; i <= 0xFF; ++i) {
+                if (map[i]) {
+                    printf("%02X ", i);
+                }
+            }
+            printf("\n");
         }
         else if (tok.compare("read_rec") == 0) {
             uint8_t record_id = 0;
