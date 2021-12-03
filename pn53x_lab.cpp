@@ -910,18 +910,41 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
             std::string tok2;
             if (!next_token(ss, tok2)) {
                 printf("Usage: %s <filename>\n", tok.c_str());
-                printf("Valid filenames: icc, envhol, evlog\n");
+                printf("Valid filenames: icc, envhol, evlog, conlist, contra, specev, loadlog, purcha\n");
                 return;
             }
             uint8_t id0, id1, id2, id3;
             if (tok2.compare("icc") == 0) {
                 id0 = 0x3F; id1 = 0x00; id2 = 0x00; id3 = 0x02;
             }
+            // Not in ATM cards
+            // else if (tok2.compare("holder") == 0) {
+            //     id0 = 0x3F; id1 = 0x00; id2 = 0x3F; id3 = 0x1C;
+            // }
             else if (tok2.compare("envhol") == 0) {
                 id0 = 0x20; id1 = 0x00; id2 = 0x20; id3 = 0x01;
             }
             else if (tok2.compare("evlog") == 0) {
                 id0 = 0x20; id1 = 0x00; id2 = 0x20; id3 = 0x10;
+            }
+            else if (tok2.compare("conlist") == 0) {
+                id0 = 0x20; id1 = 0x00; id2 = 0x20; id3 = 0x50;
+            }
+            else if (tok2.compare("contra") == 0) {
+                id0 = 0x20; id1 = 0x00; id2 = 0x20; id3 = 0x20;
+            }
+            // Not in ATM cards
+            // else if (tok2.compare("counter") == 0) {
+            //     id0 = 0x20; id1 = 0x00; id2 = 0x20; id3 = 0x69;
+            // }
+            else if (tok2.compare("specev") == 0) {
+                id0 = 0x20; id1 = 0x00; id2 = 0x20; id3 = 0x40;
+            }
+            else if (tok2.compare("loadlog") == 0) {
+                id0 = 0x10; id1 = 0x00; id2 = 0x10; id3 = 0x14;
+            }
+            else if (tok2.compare("purcha") == 0) {
+                id0 = 0x10; id1 = 0x00; id2 = 0x10; id3 = 0x15;
             }
             else {
                 ERROR("Unknown file identifier '%s'", tok2.c_str());
