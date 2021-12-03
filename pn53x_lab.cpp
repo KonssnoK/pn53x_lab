@@ -635,7 +635,7 @@ int calypso_verify(PN53x* reader)
     const uint8_t tx[] = {
         VERIFY,
         0x00, // P1 alwys 00
-        0x80, // P2
+        0x00, // P2 0x80 specific DF if 1 else global, 0x01X specific reference data
         0x00
     };
     const uint8_t* rx2 = nullptr;
