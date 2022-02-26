@@ -426,7 +426,7 @@ int typepreb_command(PN53x *reader, const uint8_t *tx, size_t tx_len, const uint
     unk += 2; if (unk == 0) unk = 2; // TODO: understand what this is
     tx2[0] = InCommunicateThru; tx2[1] = 0x01; tx2[2] = unk & 0x0F; tx2[3] = tx_len + 2; tx2[4] = 0x00;
     memcpy(tx2 + 5, tx, tx_len);
-    int ret = reader->send_command(tx2, 5 + tx_len, rx2, cmd_name, true, dump_rx_ex);
+    int ret = reader->send_command(tx2, 5 + tx_len, rx2, cmd_name, false, dump_rx_ex);
     delete tx2;
     if (ret <= 0)
         return ret;
@@ -532,7 +532,7 @@ int calypso_select_file(PN53x *reader, uint8_t id0, uint8_t id1, uint8_t id2, ui
     return 0;
 }
 
-int calypso_read_records(PN53x *reader, uint8_t record_id = 0x01, bool read_all = true) {
+int calypso_read_records(PN53x *reader, const uint8_t** out_data, uint8_t record_id = 0x01, bool read_all = true) {
     // https://cardwerk.com/smart-card-standard-iso7816-4-section-6-basic-interindustry-commands
     // http://www.ttfn.net/techno/smartcards/iso7816_4.html#ss6_5
     // section 6.5 - READ RECORDS
@@ -550,14 +550,14 @@ int calypso_read_records(PN53x *reader, uint8_t record_id = 0x01, bool read_all 
         // no Data
         0x00 // Le: length
     };
-    const uint8_t *rx2 = nullptr;
-    int res = typepreb_command(reader, tx, tx[3] + 4, &rx2, "READ_RECORDS", true);
+
+    int res = typepreb_command(reader, tx, tx[3] + 4, out_data, "READ_RECORDS", false);
     if (res < 0)
         return -1;
     
-    if (iso7816_check_response(rx2, res) < 0)
+    if (iso7816_check_response(*out_data, res) < 0)
         return -1;
-    return 0;
+    return res;
 }
 
 int calypso_select_and_read_file(PN53x *reader, uint8_t id0, uint8_t id1, uint8_t id2, uint8_t id3) {
@@ -565,7 +565,9 @@ int calypso_select_and_read_file(PN53x *reader, uint8_t id0, uint8_t id1, uint8_
     if (calypso_select_file(reader, id0, id1, id2, id3) < 0)
         return -1;
     // read file
-    return calypso_read_records(reader);
+    const uint8_t* rx_data = nullptr;
+
+    return calypso_read_records(reader, &rx_data);
 }
 
 int calypso_read_binary(PN53x *reader) {
@@ -1018,7 +1020,9 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
                 printf("Usage: read_rec <record_id>\n");
                 return;
             }
-            calypso_read_records(reader, record_id, false);
+            const uint8_t* rx_data = nullptr;
+
+            calypso_read_records(reader, &rx_data, record_id, false);
         }
         else if (tok.compare("read_bin") == 0) {
             calypso_read_binary(reader);
@@ -1039,6 +1043,61 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
         }
         else if (tok.compare("verify") == 0) {
             calypso_verify(reader);
+        }
+        else if (tok.compare("atm_dump_card") == 0) {
+
+            uint16_t files[] = {
+                0x0002,
+                0x0003,
+                0x1000,
+                0x1004,
+                0x1014,
+                0x1015,
+                0x2000,
+                0x2001,
+                0x2004,
+                0x2010,
+                0x2020,
+                0x202a,
+                0x202b,
+                0x202c,
+                0x202d,
+                0x2030,
+                0x2040,
+                0x2050,
+                0x2f10,
+                0x3100,
+                0x3101,
+                0x3102,
+                0x3104,
+                0x3113,
+                0x3115,
+                0x3f00,
+                0x3f04
+            };
+
+            // For each of the files stored in the card
+            for (int i = 0; i < (sizeof(files) / sizeof(uint16_t)); ++i) {
+                // While we can continue to read a sector
+                int j = 1;
+                printf("SELECTING FILE %04X\n", files[i]);
+                if (calypso_select_file(reader, 0, 0, (uint8_t)((files[i] >> 8) & 0xFF), (uint8_t)(files[i] & 0xFF))) {
+                    printf("Cannot select file %04X\n", files[i]);
+                }
+
+                while (true) {
+                    int rxlen;
+                    const uint8_t* rx_data = nullptr;
+                    rxlen = calypso_read_records(reader, &rx_data, j, false);
+                    if (rxlen < 0) {
+                        printf("Stop after %d records.\n", j - 1);
+                        break;
+                    } else {
+                        print_hex(rx_data, rxlen);
+                    }
+                    j++;
+                }
+            }
         }
         else {
             ERROR("Unknown command '%s'", cmd.c_str());
