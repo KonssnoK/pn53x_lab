@@ -551,13 +551,13 @@ int calypso_read_records(PN53x *reader, const uint8_t** out_data, uint8_t record
         0x00 // Le: length
     };
 
-    int res = typepreb_command(reader, tx, tx[3] + 4, out_data, "READ_RECORDS", false);
-    if (res < 0)
+    int out_len = typepreb_command(reader, tx, tx[3] + 4, out_data, "READ_RECORDS", false);
+    if (out_len < 0)
         return -1;
     
-    if (iso7816_check_response(*out_data, res) < 0)
+    if (iso7816_check_response(*out_data, out_len) < 0)
         return -1;
-    return res;
+    return out_len;
 }
 
 int calypso_select_and_read_file(PN53x *reader, uint8_t id0, uint8_t id1, uint8_t id2, uint8_t id3) {
@@ -1022,7 +1022,17 @@ void ReaderShell::execute(const std::string &cmd, bool echo_cmd) {
             }
             const uint8_t* rx_data = nullptr;
 
-            calypso_read_records(reader, &rx_data, record_id, false);
+            int len = calypso_read_records(reader, &rx_data, record_id, false);
+
+            if (len > 0) {
+                for (int i = 0; i <= len; ++i) {
+                    printf("%02X ", rx_data[i]);
+                }
+                printf("\n");
+            } else {
+                printf("Error %d\n", len);
+            }
+
         }
         else if (tok.compare("read_bin") == 0) {
             calypso_read_binary(reader);
@@ -1134,8 +1144,8 @@ int main(int argc, char **argv) {
     shell.reader = &reader;
 
     // init commands
-    // shell.execute("calypso", true);
-    shell.execute("srix", true);
+    shell.execute("calypso", true);
+    //shell.execute("srix", true);
     shell.execute("scan", true);
 
     // internal shell loop
