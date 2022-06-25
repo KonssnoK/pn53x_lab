@@ -1,0 +1,32 @@
+File names are coming from:
+https://github.com/nfc-tools/libnfc/blob/master/examples/pn53x-tamashell-scripts/ReadNavigo.sh
+https://github.com/nfc-tools/libnfc/blob/master/examples/pn53x-tamashell-scripts/ReadMobib.sh
+
+0x0002	icc
+0x0003		-> SECURED
+0x1000	
+0x1004	
+0x1014	loadlog
+0x1015	purcha
+0x2000	
+0x2001	envhol
+0x2004	
+0x2010	evlog
+0x2020	contra
+0x202a	
+0x202b	
+0x202c	
+0x202d	
+0x2030	
+0x2040	specev
+0x2050	conlist
+0x2f10	
+0x3100	
+0x3101		-> SECURED
+0x3102	
+0x3104	
+0x3113	
+0x3115	
+0x3f00	
+0x3f04	
+		
